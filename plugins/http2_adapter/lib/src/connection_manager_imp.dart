@@ -65,25 +65,18 @@ class _ConnectionManager implements ConnectionManager {
     if (onClientCreate != null) {
       onClientCreate!(uri, clientConfig);
     }
-    late SecureSocket socket;
+    late final SecureSocket socket;
     try {
       // Create socket
-      socket = await SecureSocket.connect(
-        uri.host,
-        uri.port,
-        timeout: options.connectTimeout > 0
-            ? Duration(milliseconds: options.connectTimeout)
-            : null,
-        context: clientConfig.context,
-        onBadCertificate: clientConfig.onBadCertificate,
-        supportedProtocols: ['h2'],
-      );
+      socket = clientConfig.proxy == null
+          ? await _createSocket(uri, options, clientConfig)
+          : await _createSocketWithProxy(uri, options, clientConfig);
     } on SocketException catch (e) {
       if (e.osError == null) {
         if (e.message.contains('timed out')) {
           throw DioError(
             requestOptions: options,
-            error: 'Connecting timed out [${options.connectTimeout}ms]',
+            error: 'Connecting proxy timed out [${options.connectTimeout}ms]',
             type: DioErrorType.connectTimeout,
           );
         }
@@ -97,18 +90,108 @@ class _ConnectionManager implements ConnectionManager {
       _transportState.isActive = isActive;
       if (!isActive) {
         _transportState.latestIdleTimeStamp =
-            DateTime.now().millisecondsSinceEpoch;
+            DateTime
+                .now()
+                .millisecondsSinceEpoch;
       }
     };
     //
     _transportState.delayClose(
       _closed ? 50 : _idleTimeout,
-      () {
+          () {
         _transportsMap.remove(domain);
         _transportState.transport.finish();
       },
     );
     return _transportState;
+  }
+
+
+  Future<SecureSocket> _createSocket(Uri target,
+      RequestOptions options,
+      ClientSetting clientConfig,) =>
+      SecureSocket.connect(
+        target.host,
+        target.port,
+        timeout: options.connectTimeout > 0
+            ? Duration(milliseconds: options.connectTimeout)
+            : null,
+        context: clientConfig.context,
+        onBadCertificate: clientConfig.onBadCertificate,
+        supportedProtocols: ['h2'],
+      );
+
+  Future<SecureSocket> _createSocketWithProxy(
+      Uri target,
+      RequestOptions options,
+      ClientSetting clientConfig,
+      ) async {
+    final proxySocket = await Socket.connect(
+      clientConfig.proxy!.host,
+      clientConfig.proxy!.port,
+      timeout: options.connectTimeout > 0
+          ? Duration(milliseconds: options.connectTimeout)
+          : null,
+    );
+
+    final String credentialsProxy =
+    base64Encode(utf8.encode(clientConfig.proxy!.userInfo));
+
+    //Send proxy headers
+    const crlf = '\r\n';
+
+    proxySocket.write('CONNECT ${target.host}:${target.port} HTTP/1.1');
+    proxySocket.write(crlf);
+    proxySocket.write('Host: ${target.host}:${target.port}');
+
+    if (credentialsProxy.isNotEmpty) {
+      proxySocket.write(crlf);
+      proxySocket.write('Proxy-Authorization: Basic $credentialsProxy');
+    }
+
+    proxySocket.write(crlf);
+    proxySocket.write(crlf);
+
+    final completerProxyInitialization = Completer<void>();
+
+    completerProxyInitialization.future.onError((error, stackTrace) => {
+      throw DioError(
+        requestOptions: options,
+        error: error,
+        type: DioErrorType.other,
+      )
+    });
+
+    final proxySubscription = proxySocket.listen(
+          (event) {
+        final response = ascii.decode(event);
+        final lines = response.split(crlf);
+        final statusLine = lines.first;
+
+        if (statusLine.startsWith('HTTP/1.1 200')) {
+          completerProxyInitialization.complete();
+        } else {
+          completerProxyInitialization.completeError(
+            SocketException('Proxy cannot be initialized'),
+          );
+        }
+      },
+      onError: completerProxyInitialization.completeError,
+    );
+
+    await completerProxyInitialization.future;
+
+    final socket = await SecureSocket.secure(
+      proxySocket,
+      host: target.host,
+      context: clientConfig.context,
+      onBadCertificate: clientConfig.onBadCertificate,
+      supportedProtocols: ['h2'],
+    );
+
+    proxySubscription.cancel();
+
+    return socket;
   }
 
   @override
@@ -141,7 +224,9 @@ class _ClientTransportConnectionState {
 
   ClientTransportConnection get activeTransport {
     isActive = true;
-    latestIdleTimeStamp = DateTime.now().millisecondsSinceEpoch;
+    latestIdleTimeStamp = DateTime
+        .now()
+        .millisecondsSinceEpoch;
     return transport;
   }
 
@@ -163,7 +248,9 @@ class _ClientTransportConnectionState {
     _timer = Timer(Duration(milliseconds: duration), () {
       if (!isActive) {
         var interval =
-            DateTime.now().millisecondsSinceEpoch - latestIdleTimeStamp;
+            DateTime
+                .now()
+                .millisecondsSinceEpoch - latestIdleTimeStamp;
         if (interval >= duration) {
           return callback();
         }

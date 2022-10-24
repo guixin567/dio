@@ -13,4 +13,9 @@ class ClientSetting {
   /// the connection or not.  The handler should return true
   /// to continue the [SecureSocket] connection.
   bool Function(X509Certificate certificate)? onBadCertificate;
+
+  /// [proxy] optional proxy setting.
+  /// When [proxy] setting is set, a proxy tunnel is created through which all [Dio] http2 traffic goes
+  /// This setting uses [Uri] to correctly pass the scheme, address, port of the proxy
+  Uri? proxy;
 }
